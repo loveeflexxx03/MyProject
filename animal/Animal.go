@@ -2,24 +2,20 @@ package main
 
 import "fmt"
 
-// Animal — базовый тип
 type Animal struct {
 	Name string
 }
 
-// Speak выводит, какой звук издаёт животное
 func (a Animal) Speak() {
 	fmt.Printf("%s издает какой-то звук\n", a.Name)
 }
 
-// Dog встраивает Animal — это аналог наследования в Go
 type Dog struct {
-	Animal // анонимное (встроенное) поле
+	Animal
 }
 
-// Bark — собственный метод Dog
 func (d Dog) Bark() {
-	fmt.Printf("%s гавкает\n", d.Animal.Name)
+	fmt.Printf("%s гавкает\n", d.Name)
 }
 
 func main() {
