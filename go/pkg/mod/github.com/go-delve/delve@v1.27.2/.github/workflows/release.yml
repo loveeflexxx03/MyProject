@@ -1,0 +1,121 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Git tag to release (e.g. v1.24.0). Required for non-dry-run releases.'
+        type: string
+        required: false
+      dry_run:
+        description: 'Dry run only (snapshot build, not published to GitHub Releases)'
+        type: boolean
+        default: true
+
+# Cancel in-progress runs for the same ref.
+concurrency:
+  group: "${{ github.ref }}-release"
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # create GitHub Release and upload assets
+  id-token: write   # cosign OIDC for keyless signing
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag input
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == false && inputs.tag == ''
+        run: |
+          echo "::error::A tag must be specified for non-dry-run releases"
+          exit 1
+
+      - name: Reject existing published release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response_file="${RUNNER_TEMP}/release-preflight.json"
+          encoded_tag="$(jq -rn --arg tag "${RELEASE_TAG}" '$tag | @uri')"
+
+          status="$(
+            curl \
+              --silent \
+              --show-error \
+              --output "${response_file}" \
+              --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${encoded_tag}"
+          )"
+
+          case "${status}" in
+            200)
+              echo \
+                "::error title=Release already published::"\
+                "${RELEASE_TAG} already has a published GitHub Release. "\
+                "Immutable releases cannot accept new assets. Push a new "\
+                "tag and let GoReleaser create and publish the release."
+              exit 1
+              ;;
+            404)
+              # No published release exists; an existing draft is intentionally allowed.
+              ;;
+            *)
+              echo \
+                "::error title=Release preflight failed::"\
+                "GitHub returned HTTP ${status} while checking ${RELEASE_TAG}."
+              cat "${response_file}"
+              exit 1
+              ;;
+          esac
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # full history required for goreleaser release notes
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Run goreleaser (release)
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.17.1
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ inputs.tag || github.ref_name }}
+
+      - name: Run goreleaser (snapshot)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.17.1
+          args: release --snapshot --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload snapshot artifacts
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: snapshot-dist
+          path: dist/
+          retention-days: 7
